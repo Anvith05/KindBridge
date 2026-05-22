@@ -2,7 +2,7 @@ import axios from 'axios';
 
 // Create a globally configured Axios instance
 const api = axios.create({
-    baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
+    baseURL: process.env.NEXT_PUBLIC_API_URL || '',
 });
 
 // Auto-inject JWT token if it exists in localStorage
@@ -11,11 +11,12 @@ api.interceptors.request.use((config) => {
         const authStorage = localStorage.getItem('auth-storage');
         if (authStorage) {
             try {
-                const { state } = JSON.parse(authStorage);
-                if (state?.token) {
-                    config.headers.Authorization = `Bearer ${state.token}`;
+                const parsed = JSON.parse(authStorage);
+                const token = parsed?.state?.token ?? parsed?.token;
+                if (token) {
+                    config.headers.Authorization = `Bearer ${token}`;
                 }
-            } catch (err) {
+            } catch {
                 // ignore parse error
             }
         }

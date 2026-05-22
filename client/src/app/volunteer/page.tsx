@@ -2,7 +2,7 @@
 
 import { useAuthStore } from "@/store/useAuthStore";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -11,9 +11,31 @@ import {
     CheckCircle, Clock, Loader2, Navigation, Eye, X, Calendar, User
 } from "lucide-react";
 import NotificationBell from "@/components/NotificationBell";
+import IndiaLocationPicker, { type IndiaLocationValue } from "@/components/IndiaLocationPicker";
+
+const ROLE_HOME: Record<string, string> = {
+    donor: "/donor",
+    volunteer: "/volunteer",
+    ngo: "/ngo",
+    admin: "/admin",
+};
+
+function parseIndianAddress(addr: string): IndiaLocationValue {
+    if (!addr?.trim()) {
+        return { state: "", city: "", locality: "", label: "" };
+    }
+    const parts = addr.replace(/,?\s*India\s*$/i, "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+        const state = parts[parts.length - 1] ?? "";
+        const city = parts[parts.length - 2] ?? "";
+        const locality = parts.length > 2 ? parts.slice(0, -2).join(", ") : "";
+        return { state, city, locality, label: addr };
+    }
+    return { state: "", city: "", locality: parts[0] ?? "", label: addr };
+}
 
 export default function VolunteerDashboard() {
-    const { user, logout } = useAuthStore();
+    const { user, logout, setUser } = useAuthStore();
     const router = useRouter();
     const [donations, setDonations] = useState<any[]>([]);
     const [leaderboard, setLeaderboard] = useState<any[]>([]);
@@ -24,32 +46,125 @@ export default function VolunteerDashboard() {
     const [otpInput, setOtpInput] = useState<Record<string, string>>({});
     const [photoInput, setPhotoInput] = useState<Record<string, File | null>>({});
     const [processingId, setProcessingId] = useState<string | null>(null);
+    const [locationReady, setLocationReady] = useState(false);
+    const [locationForm, setLocationForm] = useState<IndiaLocationValue>({
+        state: "", city: "", locality: "", label: "",
+    });
+    const [savedAddress, setSavedAddress] = useState("");
+    const [searchRadius, setSearchRadius] = useState(15);
+    const [savingLocation, setSavingLocation] = useState(false);
+    const [locationPickerKey, setLocationPickerKey] = useState(0);
+    const hasInitialized = useRef(false);
 
-    useEffect(() => {
-        if (!user || user.role !== "volunteer") { router.push("/auth"); return; }
-        fetchData();
-    }, [user, router]);
-
-    const fetchData = async () => {
-        setFetching(true);
+    const fetchData = useCallback(async (showLoader = true) => {
+        if (showLoader) setFetching(true);
         try {
-            const [donRes, lbRes, delRes] = await Promise.all([
-                api.get("/api/donations"),
+            const profileRes = await api.get("/api/volunteers/me");
+            const profile = profileRes.data;
+            const hasLocation = profile?.location?.coordinates?.length === 2;
+
+            if (hasLocation) {
+                setLocationReady(true);
+                const saved = profile?.presentAddress ?? "";
+                setSavedAddress(saved);
+                setLocationForm(parseIndianAddress(saved));
+            } else {
+                setLocationReady(false);
+                setDonations([]);
+            }
+
+            const [lbRes, delRes] = await Promise.all([
                 api.get("/api/volunteers/leaderboard"),
                 api.get("/api/deliveries/my"),
             ]);
-            setDonations(donRes.data);
             setLeaderboard(lbRes.data);
             setMyDeliveries(delRes.data);
+
+            if (hasLocation) {
+                const nearbyRes = await api.get("/api/volunteers/nearby-donations");
+                setDonations(nearbyRes.data.donations || []);
+                setSearchRadius(nearbyRes.data.radiusKm || 15);
+                const saved = nearbyRes.data?.presentAddress || profile?.presentAddress || "";
+                setSavedAddress(saved);
+            }
         } catch { /* ignore */ }
-        setFetching(false);
+        if (showLoader) setFetching(false);
+    }, []);
+
+    useEffect(() => {
+        if (!user) {
+            hasInitialized.current = false;
+            router.push("/auth");
+            return;
+        }
+
+        if (hasInitialized.current) return;
+        hasInitialized.current = true;
+
+        const init = async () => {
+            try {
+                const { data } = await api.get("/api/auth/me");
+                if (data.role !== "volunteer") {
+                    router.replace(ROLE_HOME[data.role] || "/auth");
+                    return;
+                }
+                if (
+                    user._id !== data._id ||
+                    user.role !== data.role ||
+                    user.name !== data.name ||
+                    user.email !== data.email
+                ) {
+                    setUser({ _id: data._id, name: data.name, email: data.email, role: data.role });
+                }
+            } catch {
+                if (user.role !== "volunteer") {
+                    router.replace(ROLE_HOME[user.role] || "/auth");
+                    return;
+                }
+            }
+            await fetchData();
+        };
+        init();
+    }, [user?._id, router, setUser, fetchData]);
+
+    const handleLocationChange = useCallback((value: IndiaLocationValue) => {
+        setLocationForm(value);
+    }, []);
+
+    const handleOpenChangeAddress = () => {
+        setLocationForm(parseIndianAddress(savedAddress));
+        setLocationPickerKey((k) => k + 1);
+        setLocationReady(false);
+    };
+
+    const handleSetLocation = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!locationForm.city || !locationForm.state) {
+            toast.error("Please select your state and city");
+            return;
+        }
+        setSavingLocation(true);
+        try {
+            await api.patch("/api/volunteers/location", {
+                city: locationForm.city,
+                state: locationForm.state,
+                locality: locationForm.locality.trim() || undefined,
+            });
+            toast.success("Location saved! Showing pickups near you.");
+            setLocationReady(true);
+            await fetchData(false);
+        } catch (err: any) {
+            toast.error(err.response?.data?.error || "Failed to save location");
+        } finally {
+            setSavingLocation(false);
+        }
     };
 
     const handleAccept = async (donationId: string) => {
         try {
             await api.post(`/api/deliveries/${donationId}/accept`);
             toast.success("Delivery accepted! OTP has been generated.");
-            fetchData();
+            fetchData(false);
         } catch (err: any) {
             toast.error(err.response?.data?.error || "Failed to accept delivery");
         }
@@ -74,7 +189,7 @@ export default function VolunteerDashboard() {
             toast.success("Pickup confirmed! Dropoff OTP generated.");
             setOtpInput(prev => ({ ...prev, [deliveryId]: "" }));
             setPhotoInput(prev => ({ ...prev, [deliveryId]: null }));
-            fetchData();
+            fetchData(false);
         } catch (err: any) {
             toast.error(err.response?.data?.error || "Pickup confirmation failed");
         } finally { setProcessingId(null); }
@@ -88,7 +203,7 @@ export default function VolunteerDashboard() {
             await api.patch(`/api/deliveries/${deliveryId}/deliver`, { otp });
             toast.success("Delivery confirmed! 🎉");
             setOtpInput(prev => ({ ...prev, [deliveryId]: "" }));
-            fetchData();
+            fetchData(false);
         } catch (err: any) {
             toast.error(err.response?.data?.error || "Delivery confirmation failed");
         } finally { setProcessingId(null); }
@@ -183,18 +298,62 @@ export default function VolunteerDashboard() {
                         <div className="flex items-center gap-2 mb-6">
                             <MapPin className="w-5 h-5 text-emerald-500" />
                             <h2 className="text-lg font-bold text-gray-900">Nearby Donations</h2>
-                            <span className="ml-auto text-xs font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">{donations.length} available</span>
+                            {locationReady && (
+                                <span className="ml-auto text-xs font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">{donations.length} within {searchRadius} km</span>
+                            )}
                         </div>
+
+                        {!locationReady && !fetching && (
+                            <div className="mb-6 p-6 rounded-2xl bg-emerald-50/80 border border-emerald-100">
+                                <h3 className="text-lg font-bold text-gray-900 mb-1">Set your present location</h3>
+                                <p className="text-sm text-gray-500 mb-4">
+                                    Choose your state and city in India. Coordinates are set automatically when you save — no GPS needed.
+                                </p>
+                                <form onSubmit={handleSetLocation} className="space-y-3">
+                                    <IndiaLocationPicker
+                                        key={locationPickerKey}
+                                        onChange={handleLocationChange}
+                                        initialState={locationForm.state}
+                                        initialCity={locationForm.city}
+                                        initialLocality={locationForm.locality}
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={savingLocation}
+                                        className="w-full py-3 text-sm font-bold text-white bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                                    >
+                                        {savingLocation ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4" />}
+                                        Save &amp; Show Nearby Pickups
+                                    </button>
+                                </form>
+                            </div>
+                        )}
+
+                        {locationReady && savedAddress && (
+                            <div className="mb-4 p-3 rounded-xl bg-gray-50 border border-gray-100 flex flex-col sm:flex-row sm:items-center gap-2">
+                                <div className="flex items-center gap-2 text-sm text-gray-600 flex-1 min-w-0">
+                                    <Navigation className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                                    <span className="truncate"><span className="font-semibold">Your location:</span> {savedAddress}</span>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleOpenChangeAddress}
+                                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 px-3 py-1.5 rounded-lg border border-emerald-200 bg-white"
+                                >
+                                    Change address
+                                </button>
+                            </div>
+                        )}
 
                         {fetching ? (
                             <div className="flex items-center justify-center py-20">
                                 <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
                             </div>
-                        ) : donations.length === 0 ? (
+                        ) : !locationReady ? null : donations.length === 0 ? (
                             <div className="text-center py-20">
                                 <Package className="w-16 h-16 text-gray-200 mx-auto mb-4" />
-                                <p className="text-gray-400 font-semibold text-lg">No donations available right now</p>
-                                <p className="text-sm text-gray-300 mt-1">Check back later for new pickups near you!</p>
+                                <p className="text-gray-400 font-semibold text-lg">No pickups near you right now</p>
+                                <p className="text-sm text-gray-300 mt-1">Try updating your address or check back later.</p>
                             </div>
                         ) : (
                             <div className="grid sm:grid-cols-2 gap-4">
@@ -212,8 +371,14 @@ export default function VolunteerDashboard() {
 
                                         {d.pickupAddress && (
                                             <div className="flex items-center gap-1.5 text-sm text-gray-400 mb-1">
-                                                <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-                                                <span className="truncate">{d.pickupAddress}</span>
+                                                <MapPin className="w-3.5 h-3.5 flex-shrink-0 text-emerald-500" />
+                                                <span className="truncate"><span className="font-medium text-gray-500">Pickup:</span> {d.pickupAddress}</span>
+                                            </div>
+                                        )}
+                                        {(d.dropAddress || d.ngoId?.address) && (
+                                            <div className="flex items-center gap-1.5 text-sm text-gray-400 mb-1">
+                                                <Navigation className="w-3.5 h-3.5 flex-shrink-0 text-brand-500" />
+                                                <span className="truncate"><span className="font-medium text-gray-500">Drop:</span> {d.dropAddress || d.ngoId?.address}{(d.dropNgoName || d.ngoId?.orgName) ? ` (${d.dropNgoName || d.ngoId?.orgName})` : ""}</span>
                                             </div>
                                         )}
 
@@ -282,8 +447,14 @@ export default function VolunteerDashboard() {
 
                                             {donation?.pickupAddress && (
                                                 <div className="flex items-center gap-1.5 text-sm text-gray-400 mb-1">
-                                                    <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-                                                    <span className="truncate">{donation.pickupAddress}</span>
+                                                    <MapPin className="w-3.5 h-3.5 flex-shrink-0 text-emerald-500" />
+                                                    <span className="truncate"><span className="font-medium text-gray-500">Pickup:</span> {donation.pickupAddress}</span>
+                                                </div>
+                                            )}
+                                            {del.ngoId?.address && (
+                                                <div className="flex items-center gap-1.5 text-sm text-gray-400 mb-1">
+                                                    <Navigation className="w-3.5 h-3.5 flex-shrink-0 text-brand-500" />
+                                                    <span className="truncate"><span className="font-medium text-gray-500">Drop:</span> {del.ngoId.address}{del.ngoId.orgName ? ` (${del.ngoId.orgName})` : ""}</span>
                                                 </div>
                                             )}
 
@@ -433,7 +604,10 @@ export default function VolunteerDashboard() {
                                 <div><div className="text-xs font-semibold text-gray-400 uppercase mb-1">Condition</div><div className="text-sm font-medium text-gray-800 capitalize">{detailModal.condition?.replace("_", " ")}</div></div>
                             </div>
                             {detailModal.description && <div><div className="text-xs font-semibold text-gray-400 uppercase mb-1">Description</div><div className="text-sm text-gray-800">{detailModal.description}</div></div>}
-                            <div><div className="text-xs font-semibold text-gray-400 uppercase mb-1">Pickup Address</div><div className="text-sm font-medium text-gray-800 flex items-center gap-1"><MapPin className="w-4 h-4 text-gray-400" />{detailModal.pickupAddress}</div></div>
+                            <div><div className="text-xs font-semibold text-gray-400 uppercase mb-1">Pickup Address</div><div className="text-sm font-medium text-gray-800 flex items-center gap-1"><MapPin className="w-4 h-4 text-emerald-500" />{detailModal.pickupAddress}</div></div>
+                            {(detailModal.dropAddress || detailModal.ngoId?.address) && (
+                                <div><div className="text-xs font-semibold text-gray-400 uppercase mb-1">Drop Address</div><div className="text-sm font-medium text-gray-800 flex items-center gap-1"><Navigation className="w-4 h-4 text-brand-500" />{detailModal.dropAddress || detailModal.ngoId?.address}{(detailModal.dropNgoName || detailModal.ngoId?.orgName) ? ` — ${detailModal.dropNgoName || detailModal.ngoId?.orgName}` : ""}</div></div>
+                            )}
                             {detailModal.donorId && <div><div className="text-xs font-semibold text-gray-400 uppercase mb-1">Donor</div><div className="text-sm font-medium text-gray-800">{detailModal.donorId.name} &middot; {detailModal.donorId.email}</div></div>}
                             <button onClick={() => { handleAccept(detailModal._id); setDetailModal(null); }}
                                 className="btn-primary w-full !py-3 !rounded-xl text-sm flex items-center justify-center gap-2 mt-4 !bg-gradient-to-r !from-emerald-500 !to-emerald-600 !shadow-emerald-500/20">

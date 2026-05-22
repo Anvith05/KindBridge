@@ -82,6 +82,14 @@ export default function NGODashboard() {
         critical: "bg-red-100 text-red-700",
     };
 
+    const requestStatusColors: Record<string, string> = {
+        active: "bg-emerald-100 text-emerald-700",
+        pledged: "bg-blue-100 text-blue-700",
+        fulfilled: "bg-brand-100 text-brand-700",
+        expired: "bg-gray-100 text-gray-600",
+        cancelled: "bg-gray-100 text-gray-600",
+    };
+
     const stats = [
         { label: "Total Requests", value: requests.length, icon: ClipboardList, gradient: "from-purple-500 to-purple-600" },
         { label: "High Priority", value: requests.filter(r => r.urgency === "critical" || r.urgency === "high").length, icon: AlertTriangle, gradient: "from-rose-500 to-rose-600" },
@@ -184,6 +192,7 @@ export default function NGODashboard() {
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-2 flex-shrink-0 ml-4">
+                                            <span className={`px-3 py-1 text-xs font-bold rounded-full capitalize ${requestStatusColors[r.status] || "bg-gray-100 text-gray-600"}`}>{r.status}</span>
                                             <span className={`px-3 py-1 text-xs font-bold rounded-full capitalize ${urgencyColors[r.urgency]}`}>{r.urgency}</span>
                                             <button onClick={() => handleDeleteRequest(r._id)}
                                                 className="w-8 h-8 rounded-lg bg-white border border-gray-200 flex items-center justify-center hover:bg-rose-50 hover:border-rose-200 transition-all opacity-0 group-hover:opacity-100">

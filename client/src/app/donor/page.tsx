@@ -2,7 +2,7 @@
 
 import { useAuthStore } from "@/store/useAuthStore";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import Link from "next/link";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -14,8 +14,15 @@ import {
 import NotificationBell from "@/components/NotificationBell";
 import WatchAndEarn from "@/components/WatchAndEarn";
 
+const ROLE_HOME: Record<string, string> = {
+    donor: "/donor",
+    volunteer: "/volunteer",
+    ngo: "/ngo",
+    admin: "/admin",
+};
+
 export default function DonorDashboard() {
-    const { user, logout } = useAuthStore();
+    const { user, logout, setUser } = useAuthStore();
     const router = useRouter();
     const [donations, setDonations] = useState<any[]>([]);
     const [requests, setRequests] = useState<any[]>([]);
@@ -35,14 +42,10 @@ export default function DonorDashboard() {
     const [pickupAddress, setPickupAddress] = useState("");
     const [availFrom, setAvailFrom] = useState("");
     const [availTo, setAvailTo] = useState("");
+    const hasInitialized = useRef(false);
 
-    useEffect(() => {
-        if (!user || user.role !== "donor") { router.push("/auth"); return; }
-        fetchAll();
-    }, [user, router]);
-
-    const fetchAll = async () => {
-        setFetching(true);
+    const fetchAll = useCallback(async (showLoader = true) => {
+        if (showLoader) setFetching(true);
         try {
             const [donRes, reqRes] = await Promise.all([
                 api.get("/api/donations/my"),
@@ -51,8 +54,45 @@ export default function DonorDashboard() {
             setDonations(donRes.data);
             setRequests(reqRes.data);
         } catch { /* ignore */ }
-        setFetching(false);
-    };
+        if (showLoader) setFetching(false);
+    }, []);
+
+    useEffect(() => {
+        if (!user) {
+            hasInitialized.current = false;
+            router.push("/auth");
+            return;
+        }
+
+        if (hasInitialized.current) return;
+        hasInitialized.current = true;
+
+        const init = async () => {
+            try {
+                const { data } = await api.get("/api/auth/me");
+                if (data.role !== "donor") {
+                    router.replace(ROLE_HOME[data.role] || "/auth");
+                    return;
+                }
+                if (
+                    user._id !== data._id ||
+                    user.role !== data.role ||
+                    user.name !== data.name ||
+                    user.email !== data.email
+                ) {
+                    setUser({ _id: data._id, name: data.name, email: data.email, role: data.role });
+                }
+                await fetchAll();
+            } catch {
+                if (user.role !== "donor") {
+                    router.replace(ROLE_HOME[user.role] || "/auth");
+                    return;
+                }
+                await fetchAll();
+            }
+        };
+        init();
+    }, [user?._id, router, setUser, fetchAll]);
 
     const handleCreate = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -79,6 +119,27 @@ export default function DonorDashboard() {
             fetchAll();
         } catch (err: any) {
             toast.error(err.response?.data?.error || "Failed to delete");
+        }
+    };
+
+    const handleAcceptRequest = async (id: string) => {
+        try {
+            await api.post(`/api/requests/${id}/accept`);
+            toast.success("Request accepted! You can fulfill it when ready.");
+            fetchAll();
+        } catch (err: any) {
+            toast.error(err.response?.data?.error || "Failed to accept request");
+        }
+    };
+
+    const handleFulfillRequest = async (id: string) => {
+        if (!confirm("Mark this NGO request as fulfilled?")) return;
+        try {
+            await api.patch(`/api/requests/${id}/fulfill`);
+            toast.success("Request marked as fulfilled!");
+            fetchAll();
+        } catch (err: any) {
+            toast.error(err.response?.data?.error || "Failed to fulfill request");
         }
     };
 
@@ -313,6 +374,35 @@ export default function DonorDashboard() {
                                                 Deadline: {new Date(r.deadline).toLocaleDateString()}
                                             </div>
                                         )}
+                                        {r.status === "pledged" && r.pledgedByDonorId && (
+                                            <div className="text-xs text-brand-600 mt-2 font-medium">
+                                                Accepted by {r.pledgedByDonorId.name || "a donor"}
+                                                {String(r.pledgedByDonorId._id) === String(user?._id) ? " (you)" : ""}
+                                            </div>
+                                        )}
+                                        <div className="mt-4 flex gap-2">
+                                            {r.status === "active" && (
+                                                <button
+                                                    onClick={() => handleAcceptRequest(r._id)}
+                                                    className="flex-1 py-2.5 text-sm font-bold text-white bg-gradient-to-r from-brand-500 to-brand-600 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                                                >
+                                                    <HeartHandshake className="w-4 h-4" /> Accept to Fulfill
+                                                </button>
+                                            )}
+                                            {r.status === "pledged" && String(r.pledgedByDonorId?._id) === String(user?._id) && (
+                                                <button
+                                                    onClick={() => handleFulfillRequest(r._id)}
+                                                    className="flex-1 py-2.5 text-sm font-bold text-white bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                                                >
+                                                    <CheckCircle className="w-4 h-4" /> Mark Fulfilled
+                                                </button>
+                                            )}
+                                            {r.status === "pledged" && String(r.pledgedByDonorId?._id) !== String(user?._id) && (
+                                                <span className="flex-1 py-2.5 text-sm font-semibold text-center text-gray-400 bg-gray-100 rounded-xl">
+                                                    Already accepted
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                 ))}
                             </div>
